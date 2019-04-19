@@ -186,9 +186,9 @@ def parse_description(soup):
     description = soup.find_all('font', class_='detDesc')
     description[:] = [desc.get_text().split(',') for desc in description]
     times, sizes, uploaders = map(list, zip(*description))
-    times[:] = [time.replace(u'\xa0', u' ').replace('Uploaded ', '') for time in times]
-    sizes[:] = [size.replace(u'\xa0', u' ').replace(' Size ', '') for size in sizes]
-    uploaders[:] = [uploader.replace(' ULed by ', '') for uploader in uploaders]
+    times[:] = [time.replace(u'\xa0', u' ').replace('Uploaded ', '') for time in times]  # type: ignore
+    sizes[:] = [size.replace(u'\xa0', u' ').replace(' Size ', '') for size in sizes]  # type: ignore
+    uploaders[:] = [uploader.replace(' ULed by ', '') for uploader in uploaders]  # type: ignore
     return times, sizes, uploaders
 
 
@@ -214,6 +214,7 @@ def parse_cat(soup):
     subcat = [' '.join(cs[1:]) for cs in cat_subcat]
     return cat, subcat
 
+
 def convert_to_bytes(size_str):
     '''
     Converts torrent sizes to a common count in bytes.
@@ -228,6 +229,7 @@ def convert_to_bytes(size_str):
 
     return size_magnitude * size_multiplier
 
+
 def convert_to_date(date_str):
     '''
     Converts the dates into a proper standardized datetime.
@@ -238,20 +240,21 @@ def convert_to_date(date_str):
     if re.search('^[0-9]+ min(s)? ago$', date_str.strip()):
         minutes_delta = int(date_str.split()[0])
         torrent_dt = datetime.now() - timedelta(minutes=minutes_delta)
-        date_str = '{}-{}-{} {}:{}'.format(torrent_dt.year, torrent_dt.month, torrent_dt.day, torrent_dt.hour, torrent_dt.minute)
+        date_str = '{}-{}-{} {}:{}'.format(
+                torrent_dt.year, torrent_dt.month, torrent_dt.day, torrent_dt.hour, torrent_dt.minute)
         date_format = '%Y-%m-%d %H:%M'
 
-    elif re.search('^[0-9]*-[0-9]*\s[0-9]+:[0-9]+$', date_str.strip()):
+    elif re.search(r'^[0-9]*-[0-9]*\s[0-9]+:[0-9]+$', date_str.strip()):
         today = datetime.today()
         date_str = '{}-'.format(today.year) + date_str
         date_format = '%Y-%m-%d %H:%M'
-    
-    elif re.search('^Today\s[0-9]+\:[0-9]+$', date_str):
+
+    elif re.search(r'^Today\s[0-9]+\:[0-9]+$', date_str):
         today = datetime.today()
         date_str = date_str.replace('Today', '{}-{}-{}'.format(today.year, today.month, today.day))
         date_format = '%Y-%m-%d %H:%M'
-    
-    elif re.search('^Y-day\s[0-9]+\:[0-9]+$', date_str):
+
+    elif re.search(r'^Y-day\s[0-9]+\:[0-9]+$', date_str):
         today = datetime.today() - timedelta(days=1)
         date_str = date_str.replace('Y-day', '{}-{}-{}'.format(today.year, today.month, today.day))
         date_format = '%Y-%m-%d %H:%M'
