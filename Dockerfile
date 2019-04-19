@@ -1,24 +1,17 @@
-FROM python:3.6.4-alpine3.7
+FROM python:3.7.3-alpine3.9
 
-RUN apk add --no-cache git
+RUN apk update && apk add --no-cache --virtual .build-deps build-base gcc
+
+COPY requirements.txt requirements.txt
+RUN pip3 install --no-cache-dir -r ./requirements.txt
+
+RUN apk del .build-deps
+
+WORKDIR /opt/thepiratebay
+COPY . .
 
 ENV BASE_URL=https://thepiratebay.org/
 
-COPY requirements.txt requirements.txt
+ENTRYPOINT ["python", "./entrypoint.py"]
 
-RUN apk add --no-cache libxml2-dev && \
-    apk add --no-cache libxml2 && \
-    apk add --update --no-cache g++ gcc libxslt-dev && \
-    pip3 install -r ./requirements.txt
-
-
-WORKDIR /opt
-
-RUN mkdir -p thepiratebay
-WORKDIR /opt/thepiratebay
-
-COPY . .
-
-RUN ["chmod", "+x", "entrypoint.sh"]
-
-ENTRYPOINT ["./entrypoint.sh"]
+EXPOSE 5000

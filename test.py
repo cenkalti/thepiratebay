@@ -1,135 +1,66 @@
-import requests
-import time
+from datetime import datetime
+
 import app
 
-# List of category codes for sequential endpoint testing
-CATEGORY_MAP = [
-  100, 101, 102, 103, 104, 199, 200, 201, 202,
-  203, 204, 205, 206, 207, 208, 209, 299, 300,
-  301, 302, 303, 304, 305, 306, 399, 400, 401,
-  402, 403, 404, 405, 406, 407, 408, 499, 500,
-  501, 502, 503, 504, 505, 506, 599, 600, 601,
-  602, 603, 604, 605, 699
-]
+api_base = 'http://127.0.0.1:5000/'
 
 
-def test_date_conv():
+def test_date_conv() -> None:
     '''
     Tests date conversion from string to datetime.
     '''
+    now = datetime(2019, 4, 19, 12, 00, 00)
     test_strings = [
-        '01-01 10:00',
-        'Today 10:00',
-        '1 min ago',
-        '3 mins ago',
-        '01-01 2016',
-        'Y-day 10:00'
+        ('01-01 10:00', datetime(now.year, 1, 1, 10, 00, 00)),
+        ('Today 10:00', datetime(2019, 4, 19, 10, 00, 00)),
+        ('1 min ago', datetime(2019, 4, 19, 11, 59, 00)),
+        ('3 mins ago', datetime(2019, 4, 19, 11, 57, 00)),
+        ('01-01 2016', datetime(2016, 1, 1)),
+        ('Y-day 10:00', datetime(2019, 4, 18, 10, 00, 00)),
     ]
 
-    passed, failed = 0, 0
-
-    print('DATE CONVERSION')
-
-    for test_str in test_strings:
-        try:
-            print('{} -> {}'.format(test_str, app.convert_to_date(test_str)))
-            passed += 1
-        except Exception:
-            print('FAILED: {}'.format(test_str))
-            failed += 1
-
-    print('{} PASSED, {} FAILED\n'.format(passed, failed))
+    for s, dt in test_strings:
+        assert app.convert_to_date(s, now) == dt
 
 
-def test_size_conv():
+def test_size_conv() -> None:
     '''
     Tests string to float conversions for sizes.
     '''
     test_strings = [
-        '50 PiB',
-        '45 TiB',
-        '4.3 EiB',
-        '1.0 GiB',
-        '100 MiB',
-        '50 KiB',
-        '5 B'
+        ('4.3 EiB', 4.3 * (2**60)),
+        ('50 PiB', 50 * 2**50),
+        ('45 TiB', 45 * 2**40),
+        ('1.0 GiB', 2**30),
+        ('100 MiB', 100 * (2**20)),
+        ('50 KiB', 50 * (2**10)),
+        ('5 B', 5),
     ]
 
-    passed, failed = 0, 0
-
-    print('SIZE CONVERSION')
-
-    for test_str in test_strings:
-        try:
-            print('{} -> {}'.format(test_str, app.convert_to_bytes(test_str)))
-            passed += 1
-        except Exception:
-            print('FAILED: {}'.format(test_str))
-            failed += 1
-
-    print('{} PASSED, {} FAILED\n'.format(passed, failed))
+    for s, i in test_strings:
+        assert app.convert_to_bytes(s) == i
 
 
-def test_recent_endpoints(api_base):
-    '''
-    Tests all the variations of /recent/ and verifies that a 200 response occurs.
-    This filters out critical errors.
-    '''
-    URL = api_base + 'recent/'
+def test_parse_page() -> None:
+    url = app.BASE_URL + 'top/207/'
+    items = app.parse_page(url)
+    assert len(items) > 1
+    t = items[0]
 
-    passed, failed = 0, 0
+    # from pprint import pprint; pprint(t)
 
-    print('/recent ENDPOINT')
-
-    for sort_filter in app.sort_filters:
-        try:
-            full_url = URL + '?sort={}'.format(sort_filter)
-            resp = requests.get(full_url)
-            print('{} -> {}'.format(full_url, resp.status_code))
-            passed = passed + 1 if resp.status_code == 200 else passed
-            failed = failed + 1 if resp.status_code != 200 else failed
-
-        except Exception:
-            print('FAILED: {}'.format(full_url))
-            failed += 1
-        time.sleep(1)
-
-    print('{} PASSED, {} FAILED\n'.format(passed, failed))
-
-
-def test_top_endpoints(api_base):
-    '''
-    Tests all the variations of /top/<category> and verifies that a 200 response occurs.
-    This filters out critical errors.
-    '''
-    URL = api_base + 'top/'
-
-    passed, failed = 0, 0
-
-    print('/top ENDPOINT')
-
-    for sort_filter in app.sort_filters:
-        for category in CATEGORY_MAP:
-            try:
-                full_url = URL + '{}/'.format(category) + '?sort={}'.format(sort_filter)
-                resp = requests.get(full_url)
-                print('{} -> {}'.format(full_url, resp.status_code))
-                passed = passed + 1 if resp.status_code == 200 else passed
-                failed = failed + 1 if resp.status_code != 200 else failed
-
-            except Exception:
-                print('FAILED: {}'.format(full_url))
-                failed += 1
-                time.sleep(1)
-
-    print('{} PASSED, {} FAILED\n'.format(passed, failed))
-
-
-if __name__ == '__main__':
-    test_date_conv()
-    test_size_conv()
-
-    local_api_base = 'http://127.0.0.1:5000/'
-
-    test_recent_endpoints(local_api_base)
-    test_top_endpoints(local_api_base)
+    assert t['category'] == 'Video'
+    assert t['subcategory'] == 'HD - Movies'
+    assert isinstance(t['title'], str)
+    assert t['title'] != ''
+    assert isinstance(t['magnet'], str)
+    assert t['magnet'].startswith('magnet:')
+    assert isinstance(t['uploader'], str)
+    assert t['uploader'] != ''
+    assert isinstance(t['upload_time'], datetime)
+    assert isinstance(t['size'], float)
+    assert t['size'] > 0
+    assert isinstance(t['seeds'], int)
+    assert t['seeds'] > 0
+    assert isinstance(t['leeches'], int)
+    assert t['leeches'] > 0
