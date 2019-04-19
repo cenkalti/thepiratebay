@@ -5,12 +5,21 @@ from typing import List, Dict, Tuple, Union
 
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify, Response, abort
+from flask import Flask, jsonify, Response
 from flask_cors import CORS
+from flask_caching import Cache
 
+
+config = {
+        'CACHE_TYPE': 'filesystem',
+        'CACHE_DIR': '/tmp/thepiratebay',
+}
 
 app = Flask(__name__)
+app.config.from_mapping(config)
+
 CORS(app)
+cache = Cache(app)
 
 BASE_URL = os.getenv('BASE_URL', 'https://thepiratebay.org/')
 
@@ -18,18 +27,14 @@ BASE_URL = os.getenv('BASE_URL', 'https://thepiratebay.org/')
 @app.route('/top-movies', methods=['GET'])
 def top_movies() -> Response:
     url = BASE_URL + 'top/207/'
-    return jsonify(parse_page(url))
+    content = fetch_page(url)
+    torrents = parse_page(content)
+    return jsonify(torrents)
 
 
-@app.route('/search/', methods=['GET'])
-@app.route('/search/<term>/', methods=['GET'])
-@app.route('/search/<term>/<int:page>/', methods=['GET'])
-def search_torrents(term: str = None, page: int = 0) -> Response:
-    if term is None:
-        abort(404, 'No search term entered<br/>Format for search: /search/search_term/page_no(optional)/')
-
-    url = BASE_URL + 'search/' + str(term) + '/' + str(page) + '/'
-    return jsonify(parse_page(url))
+@cache.memoize(50)
+def fetch_page(url: str) -> str:
+    return requests.get(url).text
 
 
 # TODO cache responses
