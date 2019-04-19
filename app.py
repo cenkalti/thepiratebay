@@ -1,132 +1,40 @@
-'''
-This is the main module
-'''
 import os
-
-import requests
 import re
-from bs4 import BeautifulSoup
-from flask import Flask, jsonify, render_template, request
-from flask_cors import CORS
 from datetime import datetime, timedelta
 
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask, jsonify
+from flask_cors import CORS
 
-APP = Flask(__name__)
-CORS(APP)
+
+app = Flask(__name__)
+CORS(app)
 
 BASE_URL = os.getenv('BASE_URL', 'https://thepiratebay.org/')
 
-# Translation table for sorting filters
-sort_filters = {
-    'title_asc': 1,
-    'title_desc': 2,
-    'time_desc': 3,
-    'time_asc': 4,
-    'size_desc': 5,
-    'size_asc': 6,
-    'seeds_desc': 7,
-    'seeds_asc': 8,
-    'leeches_desc': 9,
-    'leeches_asc': 10,
-    'uploader_asc': 11,
-    'uploader_desc': 12,
-    'category_asc': 13,
-    'category_desc': 14
-}
 
-
-@APP.route('/', methods=['GET'])
-def index():
-    '''
-    This is the home page and contains links to other API
-    '''
-    return render_template('index.html'), 200
-
-
-@APP.route('/top/', methods=['GET'])
-@APP.route('/top48h/', methods=['GET'])
-def default_top():
-    '''
-    Returns default page with categories
-    '''
-    return render_template('top.html'), 200
-
-
-@APP.route('/top/<int:cat>/', methods=['GET'])
+@app.route('/top/<int:cat>/', methods=['GET'])
 def top_torrents(cat=0):
-    '''
-    Returns top torrents
-    '''
-
-    sort = request.args.get('sort')
-    sort_arg = sort if sort in sort_filters else ''
-
     if cat == 0:
-        url = BASE_URL + 'top/' + 'all/' + str(sort_arg)
+        url = BASE_URL + 'top/' + 'all/'
     else:
-        url = BASE_URL + 'top/' + str(cat) + '/' + str(sort_arg)
-    return jsonify(parse_page(url, sort=sort_arg)), 200
-
-
-@APP.route('/top48h/<int:cat>/', methods=['GET'])
-def top48h_torrents(cat=0):
-    '''
-    Returns top torrents last 48 hrs
-    '''
-
-    sort = request.args.get('sort')
-    sort_arg = sort if sort in sort_filters else ''
-
-    if cat == 0:
-        url = BASE_URL + 'top/48h' + 'all/'
-    else:
-        url = BASE_URL + 'top/48h' + str(cat)
-
-    return jsonify(parse_page(url, sort=sort_arg)), 200
-
-
-@APP.route('/recent/', methods=['GET'])
-@APP.route('/recent/<int:page>/', methods=['GET'])
-def recent_torrents(page=0):
-    '''
-    This function implements recent page of TPB
-    '''
-    sort = request.args.get('sort')
-    sort_arg = sort if sort in sort_filters else ''
-
-    url = BASE_URL + 'recent/' + str(page)
-    return jsonify(parse_page(url, sort=sort_arg)), 200
-
-
-@APP.route('/api-search/', methods=['GET'])
-def api_search():
-    url = BASE_URL + 's/?' + request.query_string.decode('utf-8')
+        url = BASE_URL + 'top/' + str(cat) + '/'
     return jsonify(parse_page(url)), 200
 
 
-@APP.route('/search/', methods=['GET'])
-def default_search():
-    '''
-    Default page for search
-    '''
-    return 'No search term entered<br/>Format for search: /search/search_term/page_no(optional)/'
-
-
-@APP.route('/search/<term>/', methods=['GET'])
-@APP.route('/search/<term>/<int:page>/', methods=['GET'])
+@app.route('/search/', methods=['GET'])
+@app.route('/search/<term>/', methods=['GET'])
+@app.route('/search/<term>/<int:page>/', methods=['GET'])
 def search_torrents(term=None, page=0):
-    '''
-    Searches TPB using the given term. If no term is given, defaults to recent.
-    '''
+    if term is None:
+        return 'No search term entered<br/>Format for search: /search/search_term/page_no(optional)/', 404
 
-    sort = request.args.get('sort')
-    sort_arg = sort_filters[request.args.get('sort')] if sort in sort_filters else ''
-
-    url = BASE_URL + 'search/' + str(term) + '/' + str(page) + '/' + str(sort_arg)
+    url = BASE_URL + 'search/' + str(term) + '/' + str(page) + '/'
     return jsonify(parse_page(url)), 200
 
 
-def parse_page(url, sort=None):
+def parse_page(url):
     '''
     This function parses the page and returns list of torrents
     '''
@@ -153,10 +61,6 @@ def parse_page(url, sort=None):
             'category': torrent[7],
             'subcat': torrent[8],
         })
-
-    if sort:
-        sort_params = sort.split('_')
-        torrents = sorted(torrents, key=lambda k: k.get(sort_params[0]), reverse=sort_params[1].upper() == 'DESC')
 
     return torrents
 

@@ -27,14 +27,14 @@ def test_date_conv():
     ]
 
     passed, failed = 0, 0
-  
+
     print('DATE CONVERSION')
 
     for test_str in test_strings:
         try:
             print('{} -> {}'.format(test_str, app.convert_to_date(test_str)))
             passed += 1
-        except:
+        except Exception:
             print('FAILED: {}'.format(test_str))
             failed += 1
 
@@ -63,7 +63,7 @@ def test_size_conv():
         try:
             print('{} -> {}'.format(test_str, app.convert_to_bytes(test_str)))
             passed += 1
-        except:
+        except Exception:
             print('FAILED: {}'.format(test_str))
             failed += 1
 
@@ -85,11 +85,11 @@ def test_recent_endpoints(api_base):
         try:
             full_url = URL + '?sort={}'.format(sort_filter)
             resp = requests.get(full_url)
-            print('{} -> {}'.format(full_url , resp.status_code))
+            print('{} -> {}'.format(full_url, resp.status_code))
             passed = passed + 1 if resp.status_code == 200 else passed
             failed = failed + 1 if resp.status_code != 200 else failed
 
-        except:
+        except Exception:
             print('FAILED: {}'.format(full_url))
             failed += 1
         time.sleep(1)
@@ -113,11 +113,11 @@ def test_top_endpoints(api_base):
             try:
                 full_url = URL + '{}/'.format(category) + '?sort={}'.format(sort_filter)
                 resp = requests.get(full_url)
-                print('{} -> {}'.format(full_url , resp.status_code))
+                print('{} -> {}'.format(full_url, resp.status_code))
                 passed = passed + 1 if resp.status_code == 200 else passed
                 failed = failed + 1 if resp.status_code != 200 else failed
 
-            except:
+            except Exception:
                 print('FAILED: {}'.format(full_url))
                 failed += 1
                 time.sleep(1)
