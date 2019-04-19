@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 
 APP = Flask(__name__)
 CORS(APP)
-EMPTY_LIST = []
 
 BASE_URL = os.getenv('BASE_URL', 'https://thepiratebay.org/')
 
@@ -135,7 +134,7 @@ def parse_page(url, sort=None):
     soup = BeautifulSoup(data, 'lxml')
     table_present = soup.find('table', {'id': 'searchResult'})
     if table_present is None:
-        return EMPTY_LIST
+        return []
     titles = parse_titles(soup)
     magnets = parse_magnet_links(soup)
     times, sizes, uploaders = parse_description(soup)
