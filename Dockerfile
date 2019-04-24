@@ -12,6 +12,6 @@ COPY . .
 
 ENV BASE_URL=https://thepiratebay.org/
 
-ENTRYPOINT ["python", "./entrypoint.py"]
+ENTRYPOINT ["python", "app.py"]
 
 EXPOSE 5000

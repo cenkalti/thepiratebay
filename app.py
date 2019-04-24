@@ -1,183 +1,393 @@
+from gevent.monkey import patch_all; patch_all()  # noqa
+from gevent.pywsgi import WSGIServer
+
 import os
 import re
+import time
+import pickle
+import hashlib
+import traceback
+from threading import Thread, Event, Lock
+from urllib.parse import urljoin
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Union
+from dataclasses import dataclass, asdict
+from typing import List, Union, NoReturn, Match, Set, Callable, Any, Dict, DefaultDict
+from functools import update_wrapper
+from collections import defaultdict
 
-import requests
+from requests import Session
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify, Response
-from flask_cors import CORS
-from flask_caching import Cache
+from flask import Flask, jsonify, Response, make_response
+from flask.json import JSONEncoder
+from diskcache import Cache
+
+# These variables can be set via environment variables.
+HOST = os.getenv('HOST', '0.0.0.0')
+PORT = int(os.getenv('PORT', 5000))
+TPB_BASE_URL = os.getenv('TPB_BASE_URL', 'https://thepiratebay.org/')
+TMDB_KEY = os.getenv('TMDB_KEY', '')
+
+UPDATE_INTERVAL = 60
+
+TPB_PAGE_REQUEST_TIMEOUT = 30
+TPB_PAGE_CACHE_STALE = 60 * 60
+TPB_PAGE_CACHE_EXPIRE = 60 * 60 * 24
+TPB_PAGE_CACHE_BACKOFF = 60 * 10
+
+TMDB_API_REQUEST_TIMEOUT = 30
+TMDB_CONFIG_CACHE_STALE = 60 * 60 * 24
+TMDB_CONFIG_CACHE_EXPIRE = 60 * 60 * 24 * 3
+TMDB_CONFIG_CACHE_BACKOFF = 60 * 60
+TMDB_POSTER_CACHE_STALE = 60 * 60
+TMDB_POSTER_CACHE_EXPIRE = 60 * 60 * 24 * 3
+TMDB_POSTER_CACHE_BACKOFF = 60 * 10
+
+CACHE_READY_WAIT_TIMEOUT = 30
+CACHE_DIR = '/tmp/thepiratebay'
+CACHE_KEY = 'top-movies'
+
+LIMIT_NUM_TORRENTS = 40
+LIMIT_NUM_MOVIES = 20
+RETRY_AFTER = 30
 
 
-config = {
-        'CACHE_TYPE': 'filesystem',
-        'CACHE_DIR': '/tmp/thepiratebay',
-}
+# To be able to serialize datetime objects in ISO format.
+class CustomJSONEncoder(JSONEncoder):
+    def default(self, obj):  # type: ignore
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+
+        return super().default(obj)
+
 
 app = Flask(__name__)
-app.config.from_mapping(config)
+app.json_encoder = CustomJSONEncoder
 
-CORS(app)
-cache = Cache(app)
+# Fetched pages from TPB and API responses from TMDB are saved in disk cache.
+cache = Cache(CACHE_DIR)
 
-BASE_URL = os.getenv('BASE_URL', 'https://thepiratebay.org/')
+# The movie list is empty at first run.
+# This event will be set after all torrents, imdb ids and poster links are fetched.
+cache_ready = Event()
+
+# Make requests from the same session to be able to reuse HTTP connections.
+session = Session()
+
+# Data structure to return in top-movies response
+@dataclass
+class Torrent:
+    title: str
+    magnet: str
+    upload_time: datetime
+    size: int
+    seeds: int
+    leeches: int
+    detail_page: str
+    imdb_id: Union[str, None] = None
+    poster_url: Union[str, None] = None
 
 
-@app.route('/top-movies', methods=['GET'])
-def top_movies() -> Response:
-    url = BASE_URL + 'top/207/'
-    content = fetch_page(url)
+# Global list for fetched movies.
+# `update` function updates this list at interval.
+# `/top-movies` handler reads from this list.
+_top_movies: List[Torrent] = []
+
+# This lock is held when reading and updating `_top_movies` list.
+_lock = Lock()
+
+
+# Contains failure info for cache item in order to decide whether to retry operation or return cached exception.
+@dataclass
+class CacheInfo:
+    last_failure: float = 0.0
+    last_exception: Union[Exception, None] = None
+
+
+# Keep last success time along with the value to decide whether the item is stale and needs refresh.
+@dataclass
+class CacheItem:
+    value: Any
+    last_success: float
+
+
+cache_infos: DefaultDict[bytes, CacheInfo] = defaultdict(CacheInfo)
+
+
+# Our custom cache decorator for coping with unreliable and slow sources.
+# Values are considered stale after `stale` seconds and will be refreshed.
+# Values expire after `expire` seconds.
+# During the period between `stale` and `expire`, exceptions will not raised, instead stale value is returned.
+# To reduce number of requests made when the function is raising an exception,
+# a `backoff` period is applied and cached exception will be returned.
+def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callable:
+    class CachedFunction:
+        def __init__(self, f: Callable) -> None:
+            self.f = f
+            update_wrapper(self, f)
+
+        def _make_key(self, args: List[Any], kwargs: Dict[str, Any]) -> bytes:
+            m = hashlib.sha1()
+            m.update(key.encode())
+            m.update(pickle.dumps(args))
+            m.update(pickle.dumps(kwargs))
+            return m.digest()
+
+        def __call__(self, *args, **kwargs):  # type: ignore
+            _key = self._make_key(args, kwargs)
+            info = cache_infos[_key]
+            _notset = object()  # to distinguish between `None` value and "not in cache"
+            now = time.time()
+            value, expire_time = cache.get(_key, default=_notset, expire_time=True)
+
+            if value is _notset or now > value.last_success + stale:  # is stale?
+                if info.last_exception and (now < info.last_failure + backoff):  # backing off?
+                    if value is _notset:
+                        raise info.last_exception
+
+                    return value.value  # stale value
+
+                try:
+                    value = CacheItem(value=self.f(*args, **kwargs), last_success=now)
+                except Exception as e:
+                    print('exception in function %s: %s' % (self.f.__name__, e))
+                    traceback.print_exc()
+
+                    info.last_failure = now
+                    info.last_exception = e
+
+                    if value is _notset:
+                        raise
+
+                    return value.value  # stale value
+
+                cache.set(_key, value, expire=expire)
+                info.last_failure = 0.0
+                info.last_exception = None
+
+            return value.value
+    return CachedFunction
+
+
+@stalecache('get_tmdb_base_url', TMDB_CONFIG_CACHE_STALE, TMDB_CONFIG_CACHE_EXPIRE, TMDB_CONFIG_CACHE_BACKOFF)
+def get_tmdb_base_url() -> str:
+    print('getting tmdb config...')
+    CONFIG_PATTERN = 'http://api.themoviedb.org/3/configuration?api_key={key}'
+    url = CONFIG_PATTERN.format(key=TMDB_KEY)
+    r = session.get(url, timeout=TMDB_API_REQUEST_TIMEOUT)
+    config = r.json()
+    return config['images']['base_url']
+
+
+@stalecache('get_tmdb_poster_url', TMDB_POSTER_CACHE_STALE, TMDB_POSTER_CACHE_EXPIRE, TMDB_POSTER_CACHE_BACKOFF)
+def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
+    if not TMDB_KEY:
+        return None
+
+    print('getting poster for imdb id: %s' % imdb_id)
+    CONFIG_PATTERN = 'http://api.themoviedb.org/3/movie/{id}/images?api_key={key}'
+    url = CONFIG_PATTERN.format(key=TMDB_KEY, id=imdb_id)
+    r = session.get(url, timeout=TMDB_API_REQUEST_TIMEOUT)
+    response = r.json()
+    posters = response.get('posters')
+    if not posters:
+        print('no poster found for: %s' % imdb_id)
+        return None
+
+    return urljoin(get_tmdb_base_url(), 'original') + posters[0]['file_path']
+
+
+@stalecache('fetch_tpb_page', TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
+def fetch_tpb_page(url: str) -> str:
+    print("fetching tpb page: %s" % url)
+    return session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT).text
+
+
+# This function runs forever and keep `_top_movies` list up to date.
+def update() -> NoReturn:
+    global _top_movies
+    while True:
+        try:
+            torrents = fetch_and_parse()
+            with _lock:
+                _top_movies = torrents
+
+            cache_ready.set()
+        except Exception as e:
+            print('exception in update: %s' % e)
+            traceback.print_exc()
+
+            with _lock:
+                _top_movies = []
+
+        time.sleep(UPDATE_INTERVAL)
+
+
+# Starts `update` function in a daemon thread.
+# Must be called before starting to serve requests.
+def start() -> None:
+    Thread(target=update, daemon=True).start()
+
+
+def fetch_and_parse() -> List[Torrent]:
+    url = urljoin(TPB_BASE_URL, 'top/207/')
+    content = fetch_tpb_page(url)
     torrents = parse_page(content)
-    return jsonify(torrents)
+    fill_imdb_ids(torrents)
+    seen_ids: Set[str] = set()
+    imdb_torrents: List[Torrent] = []
+    for torrent in torrents:
+        if torrent.imdb_id:
+            if torrent.imdb_id not in seen_ids:
+                imdb_torrents.append(torrent)
+                seen_ids.add(torrent.imdb_id)
+
+    fill_poster_urls(imdb_torrents)
+    return imdb_torrents[:LIMIT_NUM_MOVIES]
 
 
-@cache.memoize(50)
-def fetch_page(url: str) -> str:
-    return requests.get(url).text
+def fill_poster_urls(torrents: List[Torrent]) -> None:
+    for torrent in torrents:
+        try:
+            torrent.poster_url = get_tmdb_poster_url(torrent.imdb_id)
+        except Exception as e:
+            print('exception in poster url: %s' % e)
+            continue
 
 
-# TODO cache responses
-# TODO parse imdb id
-# TODO download posters and cache
-# TODO return poster link
-# TODO serve posters
-def parse_page(url: str) -> List[Dict[str, Union[str, int, datetime]]]:
-    '''
-    This function parses the page and returns list of torrents
-    '''
-    data = requests.get(url).text
-    soup = BeautifulSoup(data)
-    table_present = soup.find('table', {'id': 'searchResult'})
-    if table_present is None:
-        return []
+def fill_imdb_ids(torrents: List[Torrent]) -> None:
+    for torrent in torrents:
+        try:
+            torrent.imdb_id = get_imdb_id(torrent.detail_page)
+        except Exception as e:
+            print('exception in imdb id: %s' % e)
+            continue
 
-    titles = parse_titles(soup)
-    magnets = parse_magnet_links(soup)
-    times, sizes, uploaders = parse_description(soup)
-    seeders, leechers = parse_seed_leech(soup)
-    cat, subcat = parse_cat(soup)
-    now = datetime.now()
+
+def get_imdb_id(detail_url: str) -> Union[str, None]:
+    detail_url = urljoin(TPB_BASE_URL, detail_url)
+    content = fetch_tpb_page(detail_url)
+    imdb_id = parse_imdb_id(content)
+    if not imdb_id:
+        print('no imdb id found for: %s' % detail_url)
+
+    return imdb_id
+
+
+def parse_imdb_id(content: str) -> Union[str, None]:
+    soup = BeautifulSoup(content, 'html.parser')
+    items = soup.find('div', id='details')
+    links = items.find_all('a', title='IMDB')
+    if links:
+        m = re.search(r'imdb.com\/title\/(tt\d+)\/', links[0]['href'])
+        if m:
+            return m.groups()[0]
+
+    return None
+
+
+def parse_page(content: str) -> List[Torrent]:
+    soup = BeautifulSoup(content, 'html.parser')
+    rows = soup.find('table', id='searchResult').find_all('tr')[:LIMIT_NUM_TORRENTS + 1]
+
+    now = datetime.utcnow()
     torrents = []
-    for torrent in zip(titles, magnets, times, sizes, uploaders, seeders, leechers, cat, subcat):
-        torrents.append({
-            'title': torrent[0],
-            'magnet': torrent[1],
-            'upload_time': convert_to_date(torrent[2], now),
-            'size': convert_to_bytes(torrent[3]),
-            'uploader': torrent[4],
-            'seeds': int(torrent[5]),
-            'leeches': int(torrent[6]),
-            'category': torrent[7],
-            'subcategory': torrent[8],
-        })
+    for row in rows:
+        if 'header' not in row.get('class', []):
+            torrent = parse_row(row, now)
+            torrents.append(torrent)
 
     return torrents
 
 
-def parse_magnet_links(soup: BeautifulSoup) -> List[str]:
-    '''
-    Returns list of magnet links from soup
-    '''
-    magnets = soup.find('table', {'id': 'searchResult'}).find_all('a', href=True)
-    magnets = [magnet['href'] for magnet in magnets if 'magnet' in magnet['href']]
-    return magnets
-
-
-def parse_titles(soup: BeautifulSoup) -> List[str]:
-    '''
-    Returns list of titles of torrents from soup
-    '''
-    titles = soup.find_all(class_='detLink')
-    titles = [title.get_text() for title in titles]
-    return titles
-
-
-def parse_description(soup: BeautifulSoup) -> Tuple[List[str], List[str], List[str]]:
-    '''
-    Returns list of time, size and uploader from soup
-    '''
-    description = soup.find_all('font', class_='detDesc')
-    description = [desc.get_text().split(',') for desc in description]
-    times = [d[0].replace(u'\xa0', u' ').replace('Uploaded ', '') for d in description]
-    sizes = [d[1].replace(u'\xa0', u' ').replace(' Size ', '') for d in description]
-    uploaders = [d[2].replace(' ULed by ', '') for d in description]
-    return times, sizes, uploaders
-
-
-def parse_seed_leech(soup: BeautifulSoup) -> Tuple[str, str]:
-    '''
-    Returns list of numbers of seeds and leeches from soup
-    '''
-    slinfo = soup.find_all('td', {'align': 'right'})
-    seeders = slinfo[::2]
-    leechers = slinfo[1::2]
-    seeders = [seeder.get_text() for seeder in seeders]
-    leechers = [leecher.get_text() for leecher in leechers]
-    return seeders, leechers
-
-
-def parse_cat(soup: BeautifulSoup) -> Tuple[List[str], List[str]]:
-    '''
-    Returns list of category and subcategory
-    '''
-    cat_subcat = soup.find_all('center')
-    cat_subcat = [c.get_text().replace('(', '').replace(')', '').split() for c in cat_subcat]
-    cat = [cs[0] for cs in cat_subcat]
-    subcat = [' '.join(cs[1:]) for cs in cat_subcat]
-    return cat, subcat
+def parse_row(row: BeautifulSoup, now: datetime) -> Torrent:
+    detlink = row.find('a', class_='detLink', href=True)
+    detdesc = row.find('font', class_='detDesc')
+    desc = [s.strip() for s in detdesc.get_text().replace('\xa0', ' ').split(',')]
+    slinfo = row.find_all('td', align='right', recursive=False)
+    return Torrent(
+            title=detlink.get_text(),
+            detail_page=detlink['href'],
+            magnet=row.find('a', title='Download this torrent using magnet', href=True)['href'],
+            upload_time=convert_to_date(desc[0].split(' ', maxsplit=1)[1], now),
+            size=convert_to_bytes(desc[1].split(' ', maxsplit=1)[1]),
+            seeds=int(slinfo[0].get_text()),
+            leeches=int(slinfo[1].get_text()),
+    )
 
 
 def convert_to_bytes(size_str: str) -> int:
-    '''
-    Converts torrent sizes to a common count in bytes.
-    '''
     size_data = size_str.split()
-
     multipliers = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB']
-
     size_magnitude = float(size_data[0])
     multiplier_exp = multipliers.index(size_data[1])
     size_multiplier = 1024 ** multiplier_exp if multiplier_exp > 0 else 1
+    return int(size_magnitude * size_multiplier)
 
-    return size_magnitude * size_multiplier
+
+def _parse_date_mins_ago(m: Match, now: datetime) -> datetime:
+    g = [int(s) for s in m.groups()]
+    return now - timedelta(minutes=g[0])
 
 
-# TODO remove strptime conversion
+def _parse_date_this_year(m: Match, now: datetime) -> datetime:
+    g = [int(s) for s in m.groups()]
+    return datetime(now.date().year, g[0], g[1], g[2], g[3])
+
+
+def _parse_date_today(m: Match, now: datetime) -> datetime:
+    g = [int(s) for s in m.groups()]
+    return datetime(now.year, now.month, now.day, g[0], g[1])
+
+
+def _parse_date_yesterday(m: Match, now: datetime) -> datetime:
+    yesterday = now.date() - timedelta(days=1)
+    g = [int(s) for s in m.groups()]
+    return datetime(yesterday.year, yesterday.month, yesterday.day, g[0], g[1])
+
+
+def _parse_date_default(m: Match, now: datetime) -> datetime:
+    g = [int(s) for s in m.groups()]
+    return datetime(g[2], g[0], g[1])
+
+
+_date_patterns = [
+        (r'^([0-9]+) mins? ago$', _parse_date_mins_ago),
+        (r'^([0-9]*)-([0-9]*)\s([0-9]+):([0-9]+)$', _parse_date_this_year),
+        (r'^Today\s([0-9]+)\:([0-9]+)$', _parse_date_today),
+        (r'^Y-day\s([0-9]+)\:([0-9]+)$', _parse_date_yesterday),
+        (r'^([0-9]*)-([0-9]*)\s([0-9]+)$', _parse_date_default),
+]
+
+
 def convert_to_date(date_str: str, now: datetime) -> datetime:
-    '''
-    Converts the dates into a proper standardized datetime.
-    '''
+    for pattern, parser in _date_patterns:
+        m = re.search(pattern, date_str.strip())
+        if m:
+            return parser(m, now)
 
-    date_format = None
+    raise Exception('cannot parse date: %s' % date_str)
 
-    if re.search('^[0-9]+ min(s)? ago$', date_str.strip()):
-        minutes_delta = int(date_str.split()[0])
-        torrent_dt = now - timedelta(minutes=minutes_delta)
-        date_str = '{}-{}-{} {}:{}'.format(
-                torrent_dt.year, torrent_dt.month, torrent_dt.day, torrent_dt.hour, torrent_dt.minute)
-        date_format = '%Y-%m-%d %H:%M'
 
-    elif re.search(r'^[0-9]*-[0-9]*\s[0-9]+:[0-9]+$', date_str.strip()):
-        today = now.date()
-        date_str = '{}-'.format(today.year) + date_str
-        date_format = '%Y-%m-%d %H:%M'
+@app.route('/top-movies', methods=['GET'])
+def top_movies() -> Response:
+    with _lock:
+        top_movies = _top_movies
 
-    elif re.search(r'^Today\s[0-9]+\:[0-9]+$', date_str):
-        today = now.date()
-        date_str = date_str.replace('Today', '{}-{}-{}'.format(today.year, today.month, today.day))
-        date_format = '%Y-%m-%d %H:%M'
+    if not top_movies:
+        ready = cache_ready.wait(CACHE_READY_WAIT_TIMEOUT)
+        if not ready:
+            response = make_response()
+            response.status_code = 503
+            response.headers.set('retry-after', str(RETRY_AFTER))
+            return response
 
-    elif re.search(r'^Y-day\s[0-9]+\:[0-9]+$', date_str):
-        today = now.date() - timedelta(days=1)
-        date_str = date_str.replace('Y-day', '{}-{}-{}'.format(today.year, today.month, today.day))
-        date_format = '%Y-%m-%d %H:%M'
+        with _lock:
+            top_movies = _top_movies
 
-    else:
-        date_format = '%m-%d %Y'
-
-    return datetime.strptime(date_str, date_format)
+    return jsonify([asdict(t) for t in top_movies])
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    start()
+    server = WSGIServer((HOST, PORT), app)
+    server.serve_forever()
