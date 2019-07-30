@@ -218,8 +218,8 @@ def update() -> NoReturn:
 
             with _lock:
                 _top_movies = []
-
-        time.sleep(UPDATE_INTERVAL)
+        finally:
+            time.sleep(UPDATE_INTERVAL)
 
 
 # Starts `update` function in a daemon thread.
