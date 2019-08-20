@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 from flask import Flask, jsonify, Response, make_response
 from flask.json import JSONEncoder
 from diskcache import Cache
+from imdb import IMDb
 
 # These variables can be set via environment variables.
 HOST = os.getenv('HOST', '0.0.0.0')
@@ -41,6 +42,11 @@ TMDB_CONFIG_CACHE_BACKOFF = 60 * 60
 TMDB_POSTER_CACHE_STALE = 60 * 60
 TMDB_POSTER_CACHE_EXPIRE = 60 * 60 * 24 * 3
 TMDB_POSTER_CACHE_BACKOFF = 60 * 10
+
+IMDB_API_REQUEST_TIMEOUT = 30
+IMDB_API_CACHE_STALE = 60 * 60
+IMDB_API_CACHE_EXPIRE = 60 * 60 * 24 * 3
+IMDB_API_CACHE_BACKOFF = 60 * 10
 
 CACHE_READY_WAIT_TIMEOUT = 30
 CACHE_DIR = '/tmp/thepiratebay'
@@ -85,6 +91,7 @@ class Torrent:
     leeches: int
     detail_page: str
     imdb_id: Union[str, None] = None
+    imdb_rating: Union[float, None] = None
     poster_url: Union[str, None] = None
 
 
@@ -174,6 +181,7 @@ def get_tmdb_base_url() -> str:
     print('getting tmdb config...')
     CONFIG_PATTERN = 'http://api.themoviedb.org/3/configuration?api_key={key}'
     url = CONFIG_PATTERN.format(key=TMDB_KEY)
+    print("getting TMDB base url")
     r = session.get(url, timeout=TMDB_API_REQUEST_TIMEOUT)
     config = r.json()
     return config['images']['base_url']
@@ -187,6 +195,7 @@ def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
     print('getting poster for imdb id: %s' % imdb_id)
     CONFIG_PATTERN = 'http://api.themoviedb.org/3/movie/{id}/images?api_key={key}'
     url = CONFIG_PATTERN.format(key=TMDB_KEY, id=imdb_id)
+    print("getting poster url of: %s" % imdb_id)
     r = session.get(url, timeout=TMDB_API_REQUEST_TIMEOUT)
     response = r.json()
     posters = response.get('posters')
@@ -201,6 +210,17 @@ def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
 def fetch_tpb_page(url: str) -> str:
     print("fetching tpb page: %s" % url)
     return session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT).text
+
+
+ia = IMDb(timeout=IMDB_API_REQUEST_TIMEOUT)
+
+
+@stalecache('get_imdb_rating', IMDB_API_CACHE_STALE, IMDB_API_CACHE_EXPIRE, IMDB_API_CACHE_BACKOFF)
+def get_imdb_rating(imdb_id: str) -> Union[str, None]:
+    print("getting imdb rating of: %s" % imdb_id)
+    imdb_id = imdb_id.lstrip('t')
+    movie = ia.get_movie(imdb_id)
+    return movie['rating']
 
 
 # This function runs forever and keep `_top_movies` list up to date.
@@ -243,6 +263,7 @@ def fetch_and_parse() -> List[Torrent]:
                 seen_ids.add(torrent.imdb_id)
 
     fill_poster_urls(imdb_torrents)
+    fill_ratings(imdb_torrents)
     return imdb_torrents[:LIMIT_NUM_MOVIES]
 
 
@@ -252,6 +273,15 @@ def fill_poster_urls(torrents: List[Torrent]) -> None:
             torrent.poster_url = get_tmdb_poster_url(torrent.imdb_id)
         except Exception as e:
             print('exception in poster url: %s' % e)
+            continue
+
+
+def fill_ratings(torrents: List[Torrent]) -> None:
+    for torrent in torrents:
+        try:
+            torrent.imdb_rating = get_imdb_rating(torrent.imdb_id)
+        except Exception as e:
+            print('exception in imdb rating: %s' % e)
             continue
 
 
