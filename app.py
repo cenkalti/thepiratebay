@@ -6,7 +6,7 @@ import re
 import time
 import pickle
 import hashlib
-import traceback
+import logging
 from threading import Thread, Event, Lock
 from urllib.parse import urljoin
 from datetime import datetime, timedelta
@@ -21,6 +21,8 @@ from flask import Flask, jsonify, Response, make_response
 from flask.json import JSONEncoder
 from diskcache import Cache
 from imdb import IMDb
+
+logger = logging.getLogger('thepiratebay')
 
 # These variables can be set via environment variables.
 HOST = os.getenv('HOST', '0.0.0.0')
@@ -157,8 +159,7 @@ def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callabl
                 try:
                     value = CacheItem(value=self.f(*args, **kwargs), last_success=now)
                 except Exception as e:
-                    print('exception in function %s: %s' % (self.f.__name__, e))
-                    traceback.print_exc()
+                    logger.exception('exception in function %s: %s', self.f.__name__, e)
 
                     info.last_failure = now
                     info.last_exception = e
@@ -178,10 +179,9 @@ def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callabl
 
 @stalecache('get_tmdb_base_url', TMDB_CONFIG_CACHE_STALE, TMDB_CONFIG_CACHE_EXPIRE, TMDB_CONFIG_CACHE_BACKOFF)
 def get_tmdb_base_url() -> str:
-    print('getting tmdb config...')
     CONFIG_PATTERN = 'http://api.themoviedb.org/3/configuration?api_key={key}'
     url = CONFIG_PATTERN.format(key=TMDB_KEY)
-    print("getting TMDB base url")
+    logger.info('getting tmdb config')
     r = session.get(url, timeout=TMDB_API_REQUEST_TIMEOUT)
     config = r.json()
     return config['images']['base_url']
@@ -192,15 +192,14 @@ def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
     if not TMDB_KEY:
         return None
 
-    print('getting poster for imdb id: %s' % imdb_id)
+    logger.info('getting poster for imdb id: %s', imdb_id)
     CONFIG_PATTERN = 'http://api.themoviedb.org/3/movie/{id}/images?api_key={key}'
     url = CONFIG_PATTERN.format(key=TMDB_KEY, id=imdb_id)
-    print("getting poster url of: %s" % imdb_id)
     r = session.get(url, timeout=TMDB_API_REQUEST_TIMEOUT)
     response = r.json()
     posters = response.get('posters')
     if not posters:
-        print('no poster found for: %s' % imdb_id)
+        logger.warning('no poster found for: %s', imdb_id)
         return None
 
     return urljoin(get_tmdb_base_url(), 'original') + posters[0]['file_path']
@@ -208,7 +207,7 @@ def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
 
 @stalecache('fetch_tpb_page', TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
 def fetch_tpb_page(url: str) -> str:
-    print("fetching tpb page: %s" % url)
+    logger.info("fetching tpb page: %s", url)
     return session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT).text
 
 
@@ -217,7 +216,7 @@ ia = IMDb(timeout=IMDB_API_REQUEST_TIMEOUT)
 
 @stalecache('get_imdb_rating', IMDB_API_CACHE_STALE, IMDB_API_CACHE_EXPIRE, IMDB_API_CACHE_BACKOFF)
 def get_imdb_rating(imdb_id: str) -> Union[str, None]:
-    print("getting imdb rating of: %s" % imdb_id)
+    logger.info("getting imdb rating of: %s", imdb_id)
     imdb_id = imdb_id.lstrip('t')
     movie = ia.get_movie(imdb_id)
     return movie['rating']
@@ -234,8 +233,7 @@ def update() -> NoReturn:
 
             cache_ready.set()
         except Exception as e:
-            print('exception in update: %s' % e)
-            traceback.print_exc()
+            logger.exception('exception in update: %s', e)
 
             with _lock:
                 _top_movies = []
@@ -250,6 +248,7 @@ def start() -> None:
 
 
 def fetch_and_parse() -> List[Torrent]:
+    logger.info("fetching top movies...")
     url = urljoin(TPB_BASE_URL, 'top/207/')
     content = fetch_tpb_page(url)
     torrents = parse_page(content)
@@ -264,6 +263,7 @@ def fetch_and_parse() -> List[Torrent]:
 
     fill_poster_urls(imdb_torrents)
     fill_ratings(imdb_torrents)
+    logger.info("fetched top movies.")
     return imdb_torrents[:LIMIT_NUM_MOVIES]
 
 
@@ -272,7 +272,7 @@ def fill_poster_urls(torrents: List[Torrent]) -> None:
         try:
             torrent.poster_url = get_tmdb_poster_url(torrent.imdb_id)
         except Exception as e:
-            print('exception in poster url: %s' % e)
+            logger.exception('exception in poster url: %s', e)
             continue
 
 
@@ -281,7 +281,7 @@ def fill_ratings(torrents: List[Torrent]) -> None:
         try:
             torrent.imdb_rating = get_imdb_rating(torrent.imdb_id)
         except Exception as e:
-            print('exception in imdb rating: %s' % e)
+            logger.exception('exception in imdb rating: %s', e)
             continue
 
 
@@ -290,7 +290,7 @@ def fill_imdb_ids(torrents: List[Torrent]) -> None:
         try:
             torrent.imdb_id = get_imdb_id(torrent.detail_page)
         except Exception as e:
-            print('exception in imdb id: %s' % e)
+            logger.exception('exception in imdb id: %s', e)
             continue
 
 
@@ -299,7 +299,7 @@ def get_imdb_id(detail_url: str) -> Union[str, None]:
     content = fetch_tpb_page(detail_url)
     imdb_id = parse_imdb_id(content)
     if not imdb_id:
-        print('no imdb id found for: %s' % detail_url)
+        logger.warning('no imdb id found for: %s', detail_url)
 
     return imdb_id
 
@@ -419,6 +419,15 @@ def top_movies() -> Response:
 
 
 if __name__ == '__main__':
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s:%(lineno)s - %(message)s')
+
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
     start()
     server = WSGIServer((HOST, PORT), app)
     server.serve_forever()
