@@ -11,11 +11,12 @@ from threading import Thread, Event, Lock
 from urllib.parse import urljoin
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
-from typing import List, Union, NoReturn, Match, Set, Callable, Any, Dict, DefaultDict
+from typing import List, NoReturn, Match, Set, Callable, Any, Dict, DefaultDict, Optional
 from functools import update_wrapper
 from collections import defaultdict
 
 from requests import Session
+from requests.exceptions import HTTPError, ReadTimeout
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, Response, make_response
 from flask.json import JSONEncoder
@@ -57,6 +58,8 @@ LIMIT_NUM_TORRENTS = int(os.getenv('LIMIT_NUM_TORRENTS', '40'))
 LIMIT_NUM_MOVIES = int(os.getenv('LIMIT_NUM_MOVIES', '20'))
 RETRY_AFTER = 30
 
+ia = IMDb(timeout=IMDB_API_REQUEST_TIMEOUT)
+
 
 # To be able to serialize datetime objects in ISO format.
 class CustomJSONEncoder(JSONEncoder):
@@ -91,9 +94,9 @@ class Torrent:
     seeds: int
     leeches: int
     detail_page: str
-    imdb_id: Union[str, None] = None
-    imdb_rating: Union[float, None] = None
-    poster_url: Union[str, None] = None
+    imdb_id: Optional[str] = None
+    imdb_rating: Optional[float] = None
+    poster_url: Optional[str] = None
 
 
 # Global list for fetched movies.
@@ -109,7 +112,7 @@ _lock = Lock()
 @dataclass
 class CacheInfo:
     last_failure: float = 0.0
-    last_exception: Union[Exception, None] = None
+    last_exception: Optional[Exception] = None
 
 
 # Keep last success time along with the value to decide whether the item is stale and needs refresh.
@@ -158,8 +161,6 @@ def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callabl
                 try:
                     value = CacheItem(value=self.f(*args, **kwargs), last_success=now)
                 except Exception as e:
-                    logger.exception('exception in cached function: %s', self.f.__name__)
-
                     info.last_failure = now
                     info.last_exception = e
 
@@ -187,7 +188,7 @@ def get_tmdb_base_url() -> str:
 
 
 @stalecache('get_tmdb_poster_url', TMDB_POSTER_CACHE_STALE, TMDB_POSTER_CACHE_EXPIRE, TMDB_POSTER_CACHE_BACKOFF)
-def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
+def get_tmdb_poster_url(imdb_id: str) -> Optional[str]:
     if not TMDB_KEY:
         return None
 
@@ -205,18 +206,15 @@ def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
 
 
 @stalecache('fetch_tpb_page', TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
-def fetch_tpb_page(url: str) -> str:
+def fetch_tpb_page(url: str) -> Optional[str]:
     logger.info("fetching tpb page: %s", url)
     response = session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.text
 
 
-ia = IMDb(timeout=IMDB_API_REQUEST_TIMEOUT)
-
-
 @stalecache('get_imdb_rating', IMDB_API_CACHE_STALE, IMDB_API_CACHE_EXPIRE, IMDB_API_CACHE_BACKOFF)
-def get_imdb_rating(imdb_id: str) -> Union[str, None]:
+def get_imdb_rating(imdb_id: str) -> Optional[str]:
     logger.info("getting imdb rating of: %s", imdb_id)
     imdb_id = imdb_id.lstrip('t')
     movie = ia.get_movie(imdb_id)
@@ -295,17 +293,28 @@ def fill_imdb_ids(torrents: List[Torrent]) -> None:
             continue
 
 
-def get_imdb_id(detail_url: str) -> Union[str, None]:
+def get_imdb_id(detail_url: str) -> Optional[str]:
     detail_url = urljoin(TPB_BASE_URL, detail_url)
-    content = fetch_tpb_page(detail_url)
+    try:
+        content = fetch_tpb_page(detail_url)
+    except HTTPError as e:
+        if 500 <= e.response.status_code < 600:
+            logger.warning('tpb returned http code: %s for: %s', e.response.status_code, detail_url)
+            return None
+        raise
+    except ReadTimeout:
+        logger.warning('read timeout when getting tpb page: %s', detail_url)
+        return None
+
     imdb_id = parse_imdb_id(content)
-    if not imdb_id:
-        logger.warning('no imdb id found for: %s', detail_url)
+    if imdb_id:
+        return imdb_id
 
-    return imdb_id
+    logger.warning('no imdb id found for: %s', detail_url)
+    return None
 
 
-def parse_imdb_id(content: str) -> Union[str, None]:
+def parse_imdb_id(content: str) -> Optional[str]:
     soup = BeautifulSoup(content, 'html.parser')
     items = soup.find('div', id='details')
     links = items.find_all('a', title='IMDB')
