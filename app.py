@@ -73,6 +73,7 @@ cache_ready = Event()
 # Make requests from the same session to be able to reuse HTTP connections.
 session = Session()
 
+
 # Data structure to return in top-movies response
 @dataclass
 class Torrent:
