@@ -158,7 +158,7 @@ def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callabl
                 try:
                     value = CacheItem(value=self.f(*args, **kwargs), last_success=now)
                 except Exception as e:
-                    logger.exception('exception in function %s: %s', self.f.__name__, e)
+                    logger.exception('exception in cached function: %s', self.f.__name__)
 
                     info.last_failure = now
                     info.last_exception = e
@@ -231,8 +231,8 @@ def update() -> NoReturn:
                 _top_movies = torrents
 
             cache_ready.set()
-        except Exception as e:
-            logger.exception('exception in update: %s', e)
+        except Exception:
+            logger.exception('exception in update function')
 
             with _lock:
                 _top_movies = []
@@ -270,8 +270,8 @@ def fill_poster_urls(torrents: List[Torrent]) -> None:
     for torrent in torrents:
         try:
             torrent.poster_url = get_tmdb_poster_url(torrent.imdb_id)
-        except Exception as e:
-            logger.exception('exception in poster url: %s', e)
+        except Exception:
+            logger.exception('exception while getting poster url')
             continue
 
 
@@ -279,8 +279,8 @@ def fill_ratings(torrents: List[Torrent]) -> None:
     for torrent in torrents:
         try:
             torrent.imdb_rating = get_imdb_rating(torrent.imdb_id)
-        except Exception as e:
-            logger.exception('exception in imdb rating: %s', e)
+        except Exception:
+            logger.exception('exception while getting imdb rating')
             continue
 
 
@@ -288,8 +288,8 @@ def fill_imdb_ids(torrents: List[Torrent]) -> None:
     for torrent in torrents:
         try:
             torrent.imdb_id = get_imdb_id(torrent.detail_page)
-        except Exception as e:
-            logger.exception('exception in imdb id: %s', e)
+        except Exception:
+            logger.exception('exception while getting imdb id')
             continue
 
 
