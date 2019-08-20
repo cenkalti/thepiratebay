@@ -207,7 +207,9 @@ def get_tmdb_poster_url(imdb_id: str) -> Union[str, None]:
 @stalecache('fetch_tpb_page', TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
 def fetch_tpb_page(url: str) -> str:
     logger.info("fetching tpb page: %s", url)
-    return session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT).text
+    response = session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.text
 
 
 ia = IMDb(timeout=IMDB_API_REQUEST_TIMEOUT)
