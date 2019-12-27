@@ -28,6 +28,7 @@ logger = logging.getLogger('thepiratebay')
 # These variables can be set via environment variables.
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
+SOCKS_PROXY = os.getenv('SOCKS_PROXY', '')
 TPB_BASE_URL = os.getenv('TPB_BASE_URL', 'https://thepiratebay.org/')
 TMDB_KEY = os.getenv('TMDB_KEY', '')
 
@@ -82,6 +83,10 @@ cache_ready = Event()
 
 # Make requests from the same session to be able to reuse HTTP connections.
 session = Session()
+
+if SOCKS_PROXY:
+    socks_url = 'socks5://%s' % SOCKS_PROXY
+    session.proxies = {'http': socks_url, 'https': socks_url}
 
 
 # Data structure to return in top-movies response
