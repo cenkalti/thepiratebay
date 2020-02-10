@@ -136,7 +136,7 @@ cache_infos: DefaultDict[bytes, CacheInfo] = defaultdict(CacheInfo)
 # During the period between `stale` and `expire`, exceptions will not raised, instead stale value is returned.
 # To reduce number of requests made when the function is raising an exception,
 # a `backoff` period is applied and cached exception will be returned.
-def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callable:
+def stalecache(stale: float, expire: float, backoff: float) -> Callable:
     class CachedFunction:
         def __init__(self, f: Callable) -> None:
             self.f = f
@@ -144,7 +144,7 @@ def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callabl
 
         def _make_key(self, args: List[Any], kwargs: Dict[str, Any]) -> bytes:
             m = hashlib.sha1()
-            m.update(key.encode())
+            m.update(self.f.__name__.encode())
             m.update(pickle.dumps(args))
             m.update(pickle.dumps(kwargs))
             return m.digest()
@@ -182,7 +182,7 @@ def stalecache(key: str, stale: float, expire: float, backoff: float) -> Callabl
     return CachedFunction
 
 
-@stalecache('get_tmdb_base_url', TMDB_CONFIG_CACHE_STALE, TMDB_CONFIG_CACHE_EXPIRE, TMDB_CONFIG_CACHE_BACKOFF)
+@stalecache(TMDB_CONFIG_CACHE_STALE, TMDB_CONFIG_CACHE_EXPIRE, TMDB_CONFIG_CACHE_BACKOFF)
 def get_tmdb_base_url() -> str:
     CONFIG_PATTERN = 'http://api.themoviedb.org/3/configuration?api_key={key}'
     url = CONFIG_PATTERN.format(key=TMDB_KEY)
@@ -192,7 +192,7 @@ def get_tmdb_base_url() -> str:
     return config['images']['base_url']
 
 
-@stalecache('get_tmdb_poster_url', TMDB_POSTER_CACHE_STALE, TMDB_POSTER_CACHE_EXPIRE, TMDB_POSTER_CACHE_BACKOFF)
+@stalecache(TMDB_POSTER_CACHE_STALE, TMDB_POSTER_CACHE_EXPIRE, TMDB_POSTER_CACHE_BACKOFF)
 def get_tmdb_poster_url(imdb_id: str) -> Optional[str]:
     if not TMDB_KEY:
         return None
@@ -210,7 +210,7 @@ def get_tmdb_poster_url(imdb_id: str) -> Optional[str]:
     return urljoin(get_tmdb_base_url(), 'original') + posters[0]['file_path']
 
 
-@stalecache('fetch_tpb_page', TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
+@stalecache(TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
 def fetch_tpb_page(url: str) -> Optional[str]:
     logger.info("fetching tpb page: %s", url)
     response = session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT)
@@ -218,7 +218,7 @@ def fetch_tpb_page(url: str) -> Optional[str]:
     return response.text
 
 
-@stalecache('get_imdb_rating', IMDB_API_CACHE_STALE, IMDB_API_CACHE_EXPIRE, IMDB_API_CACHE_BACKOFF)
+@stalecache(IMDB_API_CACHE_STALE, IMDB_API_CACHE_EXPIRE, IMDB_API_CACHE_BACKOFF)
 def get_imdb_rating(imdb_id: str) -> Optional[str]:
     logger.info("getting imdb rating of: %s", imdb_id)
     imdb_id = imdb_id.lstrip('t')
