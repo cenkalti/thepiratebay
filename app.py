@@ -253,7 +253,7 @@ def start() -> None:
 
 def fetch_and_parse() -> List[Torrent]:
     logger.info("fetching top movies...")
-    url = urljoin(TPB_BASE_URL, 'top/207/')
+    url = urljoin(TPB_BASE_URL, 'top/207')
     content = fetch_tpb_page(url)
     torrents = parse_page(content)
     fill_imdb_ids(torrents)
