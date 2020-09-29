@@ -16,8 +16,6 @@ from functools import update_wrapper
 from collections import defaultdict
 
 from requests import Session
-from requests.exceptions import HTTPError, ReadTimeout
-from bs4 import BeautifulSoup
 from flask import Flask, jsonify, Response, make_response
 from flask.json import JSONEncoder
 from diskcache import Cache
@@ -29,7 +27,7 @@ logger = logging.getLogger('thepiratebay')
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 SOCKS_PROXY = os.getenv('SOCKS_PROXY', '')
-TPB_BASE_URL = os.getenv('TPB_BASE_URL', 'https://thepiratebay.org/')
+TPB_API_URL = 'https://apibay.org/precompiled/data_top100_207.json'
 TMDB_KEY = os.getenv('TMDB_KEY', '')
 
 UPDATE_INTERVAL = 60
@@ -98,7 +96,6 @@ class Torrent:
     size: int
     seeds: int
     leeches: int
-    detail_page: str
     imdb_id: Optional[str] = None
     imdb_rating: Optional[float] = None
     poster_url: Optional[str] = None
@@ -211,11 +208,11 @@ def get_tmdb_poster_url(imdb_id: str) -> Optional[str]:
 
 
 @stalecache(TPB_PAGE_CACHE_STALE, TPB_PAGE_CACHE_EXPIRE, TPB_PAGE_CACHE_BACKOFF)
-def fetch_tpb_page(url: str) -> Optional[str]:
+def fetch_tpb_list(url: str) -> Optional[Dict[str, Any]]:
     logger.info("fetching tpb page: %s", url)
     response = session.get(url, timeout=TPB_PAGE_REQUEST_TIMEOUT)
     response.raise_for_status()
-    return response.text
+    return response.json()
 
 
 @stalecache(IMDB_API_CACHE_STALE, IMDB_API_CACHE_EXPIRE, IMDB_API_CACHE_BACKOFF)
@@ -253,10 +250,8 @@ def start() -> None:
 
 def fetch_and_parse() -> List[Torrent]:
     logger.info("fetching top movies...")
-    url = urljoin(TPB_BASE_URL, 'top/207')
-    content = fetch_tpb_page(url)
-    torrents = parse_page(content)
-    fill_imdb_ids(torrents)
+    tpb_list = fetch_tpb_list(TPB_API_URL)
+    torrents = parse_tpb_list(tpb_list)
     seen_ids: Set[str] = set()
     imdb_torrents: List[Torrent] = []
     for torrent in torrents:
@@ -289,75 +284,34 @@ def fill_ratings(torrents: List[Torrent]) -> None:
             continue
 
 
-def fill_imdb_ids(torrents: List[Torrent]) -> None:
-    for torrent in torrents:
-        try:
-            torrent.imdb_id = get_imdb_id(torrent.detail_page)
-        except Exception:
-            logger.exception('exception while getting imdb id')
-            continue
-
-
-def get_imdb_id(detail_url: str) -> Optional[str]:
-    detail_url = urljoin(TPB_BASE_URL, detail_url)
-    try:
-        content = fetch_tpb_page(detail_url)
-    except HTTPError as e:
-        if 500 <= e.response.status_code < 600:
-            logger.warning('tpb returned http code: %s for: %s', e.response.status_code, detail_url)
-            return None
-        raise
-    except ReadTimeout:
-        logger.warning('read timeout when getting tpb page: %s', detail_url)
-        return None
-
-    imdb_id = parse_imdb_id(content)
-    if imdb_id:
-        return imdb_id
-
-    logger.warning('no imdb id found for: %s', detail_url)
-    return None
-
-
-def parse_imdb_id(content: str) -> Optional[str]:
-    soup = BeautifulSoup(content, 'html.parser')
-    items = soup.find('div', id='details')
-    links = items.find_all('a', title='IMDB')
-    if links:
-        m = re.search(r'imdb.com\/title\/(tt\d+)\/', links[0]['href'])
-        if m:
-            return m.groups()[0]
-
-    return None
-
-
-def parse_page(content: str) -> List[Torrent]:
-    soup = BeautifulSoup(content, 'html.parser')
-    rows = soup.find('table', id='searchResult').find_all('tr')[:LIMIT_NUM_TORRENTS + 1]
-
+def parse_tpb_list(tpb_list: List[Dict[str, Any]]) -> List[Torrent]:
+    tpb_list = tpb_list[:LIMIT_NUM_TORRENTS + 1]
     now = datetime.utcnow()
     torrents = []
-    for row in rows:
-        if 'header' not in row.get('class', []):
-            torrent = parse_row(row, now)
-            torrents.append(torrent)
+    for item in tpb_list:
+        torrent = parse_item(item, now)
+        torrents.append(torrent)
 
     return torrents
 
 
-def parse_row(row: BeautifulSoup, now: datetime) -> Torrent:
-    detlink = row.find('a', class_='detLink', href=True)
-    detdesc = row.find('font', class_='detDesc')
-    desc = [s.strip() for s in detdesc.get_text().replace('\xa0', ' ').split(',')]
-    slinfo = row.find_all('td', align='right', recursive=False)
+def parse_item(item: Dict[str, Any], now: datetime) -> Torrent:
+    magnet_template = (
+            'magnet:?xt=urn:btih:{hash}&dn={name}'
+            '&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce'
+            '&tr=udp%3A%2F%2F9.rarbg.me%3A2850%2Fannounce'
+            '&tr=udp%3A%2F%2F9.rarbg.to%3A2920%2Fannounce'
+            '&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337'
+            '&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce'
+    )
     return Torrent(
-            title=detlink.get_text(),
-            detail_page=detlink['href'],
-            magnet=row.find('a', title='Download this torrent using magnet', href=True)['href'],
-            upload_time=convert_to_date(desc[0].split(' ', maxsplit=1)[1], now),
-            size=convert_to_bytes(desc[1].split(' ', maxsplit=1)[1]),
-            seeds=int(slinfo[0].get_text()),
-            leeches=int(slinfo[1].get_text()),
+            title=item['name'],
+            magnet=magnet_template.format(hash=item['info_hash'], name=item['name']),
+            upload_time=datetime.fromtimestamp(item['added']),
+            size=item['size'],
+            seeds=item['seeders'],
+            leeches=item['leechers'],
+            imdb_id=item['imdb'],
     )
 
 

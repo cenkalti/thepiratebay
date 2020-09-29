@@ -2,6 +2,5 @@ flask==1.1.2
 diskcache==5.0.3
 requests==2.24.0
 PySocks==1.7.1
-beautifulsoup4==4.9.2
 gevent==20.9.0
 imdbpy==2020.9.25
