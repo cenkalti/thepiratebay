@@ -1,3 +1,5 @@
-Dockerfile
-.dockerignore
 **/*.pyc
+.direnv/
+.git/
+__pycache__/
+.pytest_cache/
